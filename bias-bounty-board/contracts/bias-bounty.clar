@@ -372,3 +372,129 @@
         platform-balance: (stx-get-balance (as-contract tx-sender))
     })
 )
+
+;; Function 23: Enhanced report submission with reputation tracking
+;; #[allow(unchecked_data)]
+(define-public (submit-report-v2 (bounty-id uint) (evidence (string-ascii 500)))
+    (let
+        ((bounty (unwrap! (map-get? bounties bounty-id) err-not-found))
+         (new-report-id (var-get report-id-nonce)))
+        (asserts! (get active bounty) err-not-found)
+        (map-set reports new-report-id
+            {
+                bounty-id: bounty-id,
+                reporter: tx-sender,
+                evidence: evidence,
+                votes-for: u0,
+                votes-against: u0,
+                verified: false,
+                timestamp: stacks-block-height
+            }
+        )
+        (update-reporter-reputation tx-sender)
+        (var-set report-id-nonce (+ new-report-id u1))
+        (ok new-report-id)
+    )
+)
+
+;; Function 24: Enhanced vote tracking with reputation
+(define-public (vote-on-report-v2 (report-id uint) (vote-for bool))
+    (let
+        ((report (unwrap! (map-get? reports report-id) err-not-found))
+         (current-rep (default-to 
+            {reports-submitted: u0, reports-verified: u0, bounties-created: u0, total-votes-cast: u0}
+            (map-get? user-reputation tx-sender))))
+        (asserts! (not (has-voted-on-report report-id tx-sender)) err-already-submitted)
+        (asserts! (not (get verified report)) err-already-verified)
+        (map-set report-votes {report-id: report-id, voter: tx-sender} true)
+        (if vote-for
+            (map-set reports report-id 
+                (merge report {votes-for: (+ (get votes-for report) u1)}))
+            (map-set reports report-id 
+                (merge report {votes-against: (+ (get votes-against report) u1)}))
+        )
+        (map-set user-reputation tx-sender
+            (merge current-rep {total-votes-cast: (+ (get total-votes-cast current-rep) u1)}))
+        (ok true)
+    )
+)
+
+;; Function 25: Enhanced payment with fee deduction
+(define-public (verify-and-pay-report-v2 (report-id uint))
+    (let
+        ((report (unwrap! (map-get? reports report-id) err-not-found))
+         (bounty (unwrap! (map-get? bounties (get bounty-id report)) err-not-found))
+         (fee-amount (/ (* (get bounty-amount bounty) (var-get platform-fee-percentage)) u100))
+         (payout-amount (- (get bounty-amount bounty) fee-amount))
+         (current-earnings (default-to u0 (map-get? reporter-earnings (get reporter report)))))
+        (asserts! (is-eq tx-sender (get creator bounty)) err-not-authorized)
+        (asserts! (not (get verified report)) err-already-verified)
+        (asserts! (>= (get votes-for report) (var-get min-votes-required)) err-not-authorized)
+        (try! (as-contract (stx-transfer? payout-amount tx-sender (get reporter report))))
+        (map-set reports report-id (merge report {verified: true}))
+        (map-set bounties (get bounty-id report) (merge bounty {claimed: true, active: false}))
+        (map-set reporter-earnings (get reporter report) (+ current-earnings payout-amount))
+        (update-verified-reputation (get reporter report))
+        (var-set total-bounties-paid (+ (var-get total-bounties-paid) payout-amount))
+        (ok true)
+    )
+)
+
+;; Function 26: Get bounty creator statistics
+(define-read-only (get-creator-stats (creator principal))
+    (let
+        ((rep (default-to 
+            {reports-submitted: u0, reports-verified: u0, bounties-created: u0, total-votes-cast: u0}
+            (map-get? user-reputation creator))))
+        (ok {
+            bounties-created: (get bounties-created rep),
+            total-votes-cast: (get total-votes-cast rep)
+        })
+    )
+)
+
+;; Function 27: Check if report has enough votes for verification
+(define-read-only (is-report-ready-for-verification (report-id uint))
+    (let
+        ((report (unwrap! (map-get? reports report-id) err-not-found)))
+        (ok (and 
+            (>= (get votes-for report) (var-get min-votes-required))
+            (not (get verified report))
+        ))
+    )
+)
+
+;; Function 28: Get report age in blocks
+(define-read-only (get-report-age (report-id uint))
+    (let
+        ((report (unwrap! (map-get? reports report-id) err-not-found)))
+        (ok (- stacks-block-height (get timestamp report)))
+    )
+)
+
+;; Function 29: Get top reporters by verified reports
+(define-read-only (get-reporter-rank (reporter principal))
+    (let
+        ((rep (default-to 
+            {reports-submitted: u0, reports-verified: u0, bounties-created: u0, total-votes-cast: u0}
+            (map-get? user-reputation reporter))))
+        (ok {
+            verified-reports: (get reports-verified rep),
+            total-reports: (get reports-submitted rep),
+            success-rate: (if (> (get reports-submitted rep) u0)
+                (/ (* (get reports-verified rep) u100) (get reports-submitted rep))
+                u0
+            )
+        })
+    )
+)
+
+;; Function 30: Batch get multiple bounties
+(define-read-only (get-multiple-bounties (bounty-ids (list 5 uint)))
+    (ok (map get-bounty-safe bounty-ids))
+)
+
+;; Helper for safe bounty retrieval
+(define-private (get-bounty-safe (bounty-id uint))
+    (map-get? bounties bounty-id)
+)
