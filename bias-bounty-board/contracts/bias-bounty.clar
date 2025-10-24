@@ -249,3 +249,126 @@
         )
     )
 )
+
+;; Additional Data Variables for enhanced features
+(define-data-var platform-fee-percentage uint u5) ;; 5% default fee
+(define-data-var min-votes-required uint u3) ;; Minimum votes for verification
+(define-data-var total-bounties-paid uint u0) ;; Track total payouts
+
+;; Additional Data Maps
+(define-map user-reputation
+    principal
+    {
+        reports-submitted: uint,
+        reports-verified: uint,
+        bounties-created: uint,
+        total-votes-cast: uint
+    }
+)
+
+(define-map bounty-categories
+    uint
+    (string-ascii 50)
+)
+
+(define-map reporter-earnings
+    principal
+    uint
+)
+
+;; Function 11: Update user reputation after report submission
+(define-private (update-reporter-reputation (reporter principal))
+    (let
+        ((current-rep (default-to 
+            {reports-submitted: u0, reports-verified: u0, bounties-created: u0, total-votes-cast: u0}
+            (map-get? user-reputation reporter))))
+        (map-set user-reputation reporter
+            (merge current-rep {reports-submitted: (+ (get reports-submitted current-rep) u1)}))
+        true
+    )
+)
+
+;; Function 12: Update user reputation after verification
+(define-private (update-verified-reputation (reporter principal))
+    (let
+        ((current-rep (default-to 
+            {reports-submitted: u0, reports-verified: u0, bounties-created: u0, total-votes-cast: u0}
+            (map-get? user-reputation reporter))))
+        (map-set user-reputation reporter
+            (merge current-rep {reports-verified: (+ (get reports-verified current-rep) u1)}))
+        true
+    )
+)
+
+;; Function 13: Get user reputation
+(define-read-only (get-user-reputation (user principal))
+    (ok (default-to 
+        {reports-submitted: u0, reports-verified: u0, bounties-created: u0, total-votes-cast: u0}
+        (map-get? user-reputation user)))
+)
+
+;; Function 14: Get user total earnings
+(define-read-only (get-user-earnings (user principal))
+    (ok (default-to u0 (map-get? reporter-earnings user)))
+)
+
+;; Function 15: Set bounty category
+;; #[allow(unchecked_data)]
+(define-public (set-bounty-category (bounty-id uint) (category (string-ascii 50)))
+    (let
+        ((bounty (unwrap! (map-get? bounties bounty-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get creator bounty)) err-not-authorized)
+        (map-set bounty-categories bounty-id category)
+        (ok true)
+    )
+)
+
+;; Function 16: Get bounty category
+(define-read-only (get-bounty-category (bounty-id uint))
+    (ok (map-get? bounty-categories bounty-id))
+)
+
+;; Function 17: Update minimum votes required (owner only)
+(define-public (set-min-votes-required (new-min uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (>= new-min u1) err-insufficient-bounty)
+        (var-set min-votes-required new-min)
+        (ok true)
+    )
+)
+
+;; Function 18: Get minimum votes required
+(define-read-only (get-min-votes-required)
+    (ok (var-get min-votes-required))
+)
+
+;; Function 19: Update platform fee (owner only)
+(define-public (set-platform-fee (new-fee uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (<= new-fee u20) err-not-authorized) ;; Max 20% fee
+        (var-set platform-fee-percentage new-fee)
+        (ok true)
+    )
+)
+
+;; Function 20: Get platform fee percentage
+(define-read-only (get-platform-fee)
+    (ok (var-get platform-fee-percentage))
+)
+
+;; Function 21: Calculate platform fee for a bounty
+(define-read-only (calculate-fee (bounty-amount uint))
+    (ok (/ (* bounty-amount (var-get platform-fee-percentage)) u100))
+)
+
+;; Function 22: Get total platform statistics
+(define-read-only (get-platform-stats)
+    (ok {
+        total-bounties: (var-get bounty-id-nonce),
+        total-reports: (var-get report-id-nonce),
+        total-paid: (var-get total-bounties-paid),
+        platform-balance: (stx-get-balance (as-contract tx-sender))
+    })
+)
