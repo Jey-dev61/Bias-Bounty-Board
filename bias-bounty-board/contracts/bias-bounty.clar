@@ -135,3 +135,117 @@
         (ok true)
     )
 )
+
+;; Function 1: Cancel bounty (only by creator if not claimed)
+(define-public (cancel-bounty (bounty-id uint))
+    (let
+        ((bounty (unwrap! (map-get? bounties bounty-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get creator bounty)) err-not-authorized)
+        (asserts! (not (get claimed bounty)) err-already-verified)
+        (try! (as-contract (stx-transfer? (get bounty-amount bounty) tx-sender (get creator bounty))))
+        (map-set bounties bounty-id (merge bounty {active: false}))
+        (ok true)
+    )
+)
+
+;; Function 2: Update bounty amount (increase only)
+(define-public (increase-bounty-amount (bounty-id uint) (additional-amount uint))
+    (let
+        ((bounty (unwrap! (map-get? bounties bounty-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get creator bounty)) err-not-authorized)
+        (asserts! (get active bounty) err-not-found)
+        (asserts! (>= additional-amount u100000) err-insufficient-bounty)
+        (try! (stx-transfer? additional-amount tx-sender (as-contract tx-sender)))
+        (map-set bounties bounty-id 
+            (merge bounty {bounty-amount: (+ (get bounty-amount bounty) additional-amount)}))
+        (ok true)
+    )
+)
+
+;; Function 3: Get total number of reports for a bounty
+(define-read-only (get-bounty-report-count (bounty-id uint))
+    (let
+        ((total-reports (var-get report-id-nonce)))
+        (ok (fold count-reports-for-bounty (list total-reports) bounty-id))
+    )
+)
+
+;; Function 4: Get report vote ratio
+(define-read-only (get-report-vote-ratio (report-id uint))
+    (let
+        ((report (unwrap! (map-get? reports report-id) err-not-found))
+         (total-votes (+ (get votes-for report) (get votes-against report))))
+        (if (> total-votes u0)
+            (ok (/ (* (get votes-for report) u100) total-votes))
+            (ok u0)
+        )
+    )
+)
+
+;; Function 5: Check if bounty is claimable (has valid reports)
+(define-read-only (is-bounty-claimable (bounty-id uint))
+    (let
+        ((bounty (unwrap! (map-get? bounties bounty-id) err-not-found)))
+        (ok (and (get active bounty) (not (get claimed bounty))))
+    )
+)
+
+;; Function 6: Withdraw report (by reporter before verification)
+(define-public (withdraw-report (report-id uint))
+    (let
+        ((report (unwrap! (map-get? reports report-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get reporter report)) err-not-authorized)
+        (asserts! (not (get verified report)) err-already-verified)
+        (asserts! (is-eq (get votes-for report) u0) err-not-authorized)
+        (map-delete reports report-id)
+        (ok true)
+    )
+)
+
+;; Function 7: Get all active bounties count
+(define-read-only (get-active-bounty-count)
+    (ok (var-get bounty-id-nonce))
+)
+
+;; Function 8: Get report details with bounty info
+(define-read-only (get-report-with-bounty (report-id uint))
+    (let
+        ((report (unwrap! (map-get? reports report-id) err-not-found))
+         (bounty (unwrap! (map-get? bounties (get bounty-id report)) err-not-found)))
+        (ok {
+            report: report,
+            bounty-amount: (get bounty-amount bounty),
+            model-name: (get model-name bounty)
+        })
+    )
+)
+
+;; Function 9: Bulk vote verification check
+(define-read-only (check-multiple-votes (report-id uint) (voters (list 10 principal)))
+    (ok (map check-voter-status (list {rid: report-id, voter: (unwrap-panic (element-at voters u0))}
+                                       {rid: report-id, voter: (unwrap-panic (element-at voters u1))})))
+)
+
+;; Function 10: Get total bounty pool value
+(define-read-only (get-total-bounty-pool)
+    (ok (stx-get-balance (as-contract tx-sender)))
+)
+
+;; Helper function for vote checking
+(define-private (check-voter-status (input {rid: uint, voter: principal}))
+    (has-voted-on-report (get rid input) (get voter input))
+)
+
+;; Helper function for counting reports
+(define-private (count-reports-for-bounty (report-id uint) (target-bounty-id uint))
+    (let
+        ((report-opt (map-get? reports report-id)))
+        (if (is-some report-opt)
+            (if (is-eq (get bounty-id (unwrap-panic report-opt)) target-bounty-id)
+                u1
+                u0
+            )
+            u0
+        )
+    )
+)
